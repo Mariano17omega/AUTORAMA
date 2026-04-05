@@ -14,16 +14,16 @@ const char ID_CARRO[] = "C1";
 // RADIO
 // =====================================================================
 RF24 radio(9, 10);
-const byte enderecoRX[6]       = "ABC123";
+const byte enderecoRX[6]    = "ABC123";
 const byte enderecoPista[6] = "FGH789";
 
 // =====================================================================
 // LEDS
 // =====================================================================
-const int LED_VERMELHO     = A0;
-const int LED_AZUL      = A1;
-const int  LED_VERDE  = A3;
-const int LED_WAIT      = A2;
+const int LED_VERMELHO = A0;
+const int LED_AZUL     = A1;
+const int LED_VERDE    = A3;
+const int LED_WAIT     = A2;
 
 // =====================================================================
 // MOTOR
@@ -33,20 +33,18 @@ const int IN2 = 4;
 const int EN  = 3;
 
 // =====================================================================
-// SENSOR VL53L0X
+// SENSOR VL53L0X (anti-colisão)
 // =====================================================================
 VL53L0X sensor;
 unsigned long ultimoUpdateDist = 0;
-const unsigned long intervaloDist = 90;
+const unsigned long intervaloDist = 90; // ms
 
 // =====================================================================
-// ESTADOS
+// ESTADOS DO SISTEMA
 // =====================================================================
-bool bloqueado = false;
+bool bloqueado    = false;
 bool comandoAtivo = false;
-int  ultimoPWM = 0;
-
-
+int  ultimoPWM    = 0;
 
 // =====================================================================
 // BUFFER RF
@@ -58,115 +56,87 @@ char strRot[12];
 // =====================================================================
 // SENSOR HALL / VELOCIDADE
 // =====================================================================
-const byte PIN_HALL = 5;
-const byte IMAS_POR_VOLTA = 1;
+const byte  PIN_HALL       = 5;
+const byte  IMAS_POR_VOLTA = 1;
 
+// CORREÇÃO: usar constante PI do Arduino em vez de valor literal
+const float DIAMETRO_RODA  = 0.0245f;
+const float CIRCUNFERENCIA = PI * DIAMETRO_RODA;
 
-
-const float DIAMETRO_RODA = 0.0245; // diametro em metros
-const float CIRCUNFERENCIA = 3.1415926 * DIAMETRO_RODA;
-
-// Contadores / estado do hall
-volatile unsigned long pulsosTotais = 0;
-volatile unsigned long pulsosRejeitados = 0; // debug
+// Contadores / estado do Hall
+volatile unsigned long pulsosTotais      = 0;
 volatile unsigned long ultimoDtValido_us = 0;
+volatile byte          estadoAnterior    = LOW;
 
-
-volatile byte estadoAnterior = LOW;
-
-// ===== NOVO: medição por Δt (micros) + filtro EMA =====
-volatile unsigned long tPulsoAtual_us = 0;
+// Medição por Δt (micros) + filtro EMA
+volatile unsigned long tPulsoAtual_us    = 0;
 volatile unsigned long tPulsoAnterior_us = 0;
-volatile bool novoPulso = false;
-volatile bool armadoParaNovoPulso = true;
+volatile bool          novoPulso           = false;
+volatile bool          armadoParaNovoPulso = true;
 
+// Debounce / blanking por tempo
+const unsigned long TEMPO_MIN_US = 10000; // 10 ms mínimo entre pulsos válidos
+const float         FATOR_MIN_DT = 0.75f; // 75% do último Δt válido
 
-// Debounce/blanking por tempo (anti-ruído). Ajuste conforme seu hardware.
-const unsigned long TEMPO_MIN_US = 10000; // 10 ms
-const float FATOR_MIN_DT = 0.75f;           // 75% do último dt válido
+// Filtro EMA (1ª ordem)
+float velocidade_filt = 0.0f;
+const float ALPHA     = 0.15f;
 
-
-// Filtro de velocidade (1ª ordem / EMA)
-float velocidade_inst = 0.0f;     // m/s
-float velocidade_filt = 0.0f;     // m/s
-const float ALPHA = 0.15f;        // quando maior mais ruidos
-
-// Variáveis calculadas (mantidas)
-float rpm = 0.0;
-float velocidade = 0.0;
-float rotacoesTotais = 0.0;
-//float rotacoesTotaisAnt = 0.0;
-// Controle de envio (mantido)
-//unsigned long ultimaRotacaoEnviada = 0;
-//  unsigned long pulsoAtual;
-//static unsigned long ultimoPulsoEnviado = 0;
+// Variáveis calculadas (persistem entre iterações do loop)
+float velocidade     = 0.0f;
+float rotacoesTotais = 0.0f;
 
 // =====================================================================
-
 // ISR – SENSOR HALL (PCINT2 – D5)
 // =====================================================================
 ISR(PCINT2_vect) {
-  byte estadoAtual = (PIND & (1 << PD5)) ? HIGH : LOW;
+  byte estadoAtual   = (PIND & (1 << PD5)) ? HIGH : LOW;
   unsigned long agora_us = micros();
 
-  // borda de descida só conta se estiver armado
+  // Conta apenas borda de subida quando armado
   if (armadoParaNovoPulso && estadoAnterior == LOW && estadoAtual == HIGH) {
-
     bool aceita = false;
 
     if (tPulsoAtual_us == 0) {
-      // primeiro pulso
-      aceita = true;
+      aceita = true; // primeiro pulso — sem referência anterior
     } else {
       unsigned long dtDesdeUltimo = agora_us - tPulsoAtual_us;
-
-      unsigned long limiteMinimo = TEMPO_MIN_US; // ignora pulsos muito próximos
+      unsigned long limiteMinimo  = TEMPO_MIN_US;
 
       if (ultimoDtValido_us > 0) {
         unsigned long limiteRelativo = (unsigned long)(FATOR_MIN_DT * ultimoDtValido_us);
-        if (limiteRelativo > limiteMinimo) {
-          limiteMinimo = limiteRelativo;
-        }
+        if (limiteRelativo > limiteMinimo) limiteMinimo = limiteRelativo;
       }
 
-      if (dtDesdeUltimo >= limiteMinimo) {
-        aceita = true;
-      }
+      aceita = (dtDesdeUltimo >= limiteMinimo);
     }
 
     if (aceita) {
-      pulsosTotais ++;
+      pulsosTotais++;
       tPulsoAnterior_us = tPulsoAtual_us;
-      tPulsoAtual_us = agora_us;
+      tPulsoAtual_us    = agora_us;
 
-      if (tPulsoAnterior_us > 0) {
+      if (tPulsoAnterior_us > 0)
         ultimoDtValido_us = tPulsoAtual_us - tPulsoAnterior_us;
-      }
 
-      novoPulso = true;
-      armadoParaNovoPulso = false; // trava até liberar
-    } else {
-      pulsosRejeitados++;
+      novoPulso           = true;
+      armadoParaNovoPulso = false; // trava até a borda de descida
     }
   }
 
-  // só rearma quando voltar para HIGH
-if (estadoAnterior == HIGH  && estadoAtual == LOW ) {
-  armadoParaNovoPulso = true;
-}
+  // Rearma na borda de descida
+  if (estadoAnterior == HIGH && estadoAtual == LOW)
+    armadoParaNovoPulso = true;
 
   estadoAnterior = estadoAtual;
 }
 
- 
-
 // =====================================================================
 // FUNÇÕES AUXILIARES
 // =====================================================================
-int medirDistancia() { 
-  return sensor.readRangeContinuousMillimeters() /10 ; 
+int medirDistancia() {
+  return sensor.readRangeContinuousMillimeters() / 10;
 }
-
 
 void aplicarPWMnoMotor(int pwm) {
   analogWrite(EN, pwm);
@@ -175,13 +145,11 @@ void aplicarPWMnoMotor(int pwm) {
 }
 
 void atualizarLEDs() {
-
   digitalWrite(LED_AZUL, comandoAtivo ? HIGH : LOW);
 
   if (bloqueado) {
     digitalWrite(LED_VERMELHO, HIGH);
-    digitalWrite(LED_VERDE, LOW);
-    
+    digitalWrite(LED_VERDE,    LOW);
   } else {
     digitalWrite(LED_VERMELHO, LOW);
     digitalWrite(LED_VERDE, (ultimoPWM > 0) ? HIGH : LOW);
@@ -192,72 +160,63 @@ void atualizarLEDs() {
 // RECEPÇÃO RF
 // =====================================================================
 void checkRF() {
-
   if (!radio.available()) return;
 
   digitalWrite(LED_WAIT, HIGH);
 
   while (radio.available()) {
-
-    radio.read(&ValorPWM, sizeof(ValorPWM));
-
+    // CORREÇÃO: remover '&' — ValorPWM já é ponteiro para char[15]
+    radio.read(ValorPWM, sizeof(ValorPWM));
     comandoAtivo = true;
 
     int pwmRecebido = atoi(&ValorPWM[1]);
     pwmRecebido = constrain(pwmRecebido, 0, 255);
-    ultimoPWM = pwmRecebido;
+    ultimoPWM   = pwmRecebido;
 
-    if (!bloqueado)
-      aplicarPWMnoMotor(ultimoPWM);
-    else
-      aplicarPWMnoMotor(0);
+    if (!bloqueado) aplicarPWMnoMotor(ultimoPWM);
+    else            aplicarPWMnoMotor(0);
   }
 
   atualizarLEDs();
-  
+  // CORREÇÃO: apagar LED_WAIT após processar — antes ficava aceso indefinidamente
+  digitalWrite(LED_WAIT, LOW);
 }
 
 // =====================================================================
-// ENVIO DE TELEMETRIA (COMPARAÇÃO SEGURA, SEM == EM FLOAT)
+// ENVIO DE TELEMETRIA
 // =====================================================================
 void enviarTelemetria() {
   char msg[32];
 
-  dtostrf(velocidade, 0, 4, strVel);
+  dtostrf(velocidade,     0, 4, strVel);
   dtostrf(rotacoesTotais, 0, 2, strRot);
-
   snprintf(msg, sizeof(msg), "%s;%s;%s", ID_CARRO, strVel, strRot);
-  digitalWrite(LED_WAIT, HIGH);
-
-  //Serial.println(msg);
 
   radio.stopListening();
   radio.openWritingPipe(enderecoPista);
   radio.write(msg, strlen(msg) + 1);
   radio.startListening();
-  digitalWrite(LED_WAIT, HIGH);
-
 }
 
 // =====================================================================
 // SETUP
 // =====================================================================
 void setup() {
-
   Serial.begin(9600);
 
-  pinMode(LED_VERDE, OUTPUT);
-  pinMode(LED_AZUL, OUTPUT);
+  pinMode(LED_VERDE,    OUTPUT);
+  pinMode(LED_AZUL,     OUTPUT);
   pinMode(LED_VERMELHO, OUTPUT);
-  pinMode(LED_WAIT, OUTPUT);
+  pinMode(LED_WAIT,     OUTPUT);
+  digitalWrite(LED_WAIT, LOW); // garantir estado inicial apagado
 
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
-  pinMode(EN, OUTPUT);
+  pinMode(EN,  OUTPUT);
 
   pinMode(PIN_HALL, INPUT);
 
-  // PCINT D5
+  // Habilita interrupção por mudança de pino em D5 (PCINT21)
   PCICR  |= (1 << PCIE2);
   PCMSK2 |= (1 << PCINT21);
 
@@ -273,19 +232,17 @@ void setup() {
   sensor.setTimeout(500);
   sensor.startContinuous();
 
-  Serial.println("CARRO COM TELEMETRIA INICIALIZADO");
+  Serial.println("Carro inicializado.");
 }
 
 // =====================================================================
 // LOOP PRINCIPAL
 // =====================================================================
 void loop() {
-
   checkRF();
 
-  // ===== SENSOR DE DISTÂNCIA =====
+  // ===== SENSOR DE DISTÂNCIA (anti-colisão) =====
   if (millis() - ultimoUpdateDist >= intervaloDist) {
-
     ultimoUpdateDist = millis();
     int dist = medirDistancia();
     bool estavaBloqueado = bloqueado;
@@ -293,8 +250,7 @@ void loop() {
     if (dist <= 10) {
       bloqueado = true;
       aplicarPWMnoMotor(0);
-    }
-    else if (dist >= 15) {
+    } else if (dist >= 15) {
       bloqueado = false;
       if (comandoAtivo && estavaBloqueado)
         aplicarPWMnoMotor(ultimoPWM);
@@ -303,48 +259,33 @@ void loop() {
     atualizarLEDs();
   }
 
+  // ===== LEITURA ATÔMICA DO HALL =====
+  unsigned long pulsos, tAtual, tAnterior;
+  bool pulsoNovo;
 
-  //atualiza dados 
-  
-unsigned long pulsos;
-unsigned long tAtual;
-unsigned long tAnterior;
-unsigned long rejeitados;
-bool pulsoNovo;
-noInterrupts();
-pulsos = pulsosTotais;
-tAtual = tPulsoAtual_us;
-tAnterior = tPulsoAnterior_us;
-pulsoNovo = novoPulso;
-rejeitados = pulsosRejeitados;
-novoPulso = false;
-interrupts();
+  noInterrupts();
+  pulsos    = pulsosTotais;
+  tAtual    = tPulsoAtual_us;
+  tAnterior = tPulsoAnterior_us;
+  pulsoNovo = novoPulso;
+  novoPulso = false;
+  interrupts();
 
-  rotacoesTotais = (float)pulsos / IMAS_POR_VOLTA; //Sempre atualiza rotações totais (acumulado)
+  rotacoesTotais = (float)pulsos / IMAS_POR_VOLTA;
 
-
-  // ===== calcular velocidade) =====
+  // ===== CÁLCULO DE VELOCIDADE E ENVIO DE TELEMETRIA =====
   if (pulsoNovo && tAnterior > 0 && tAtual > tAnterior) {
+    float dt = (tAtual - tAnterior) * 1e-6f;
 
-    float dt = (tAtual - tAnterior) * 1e-6f; // tempo entre pulsos (s)
+    if (dt > 0.000001f) {
+      float rps          = (1.0f / dt) / IMAS_POR_VOLTA;
+      float velocidade_inst = rps * CIRCUNFERENCIA;
 
-    
-    if (dt > 0.000001f) { // Proteção simples contra dt absurdo (por segurança)
-
-      float rps = (1.0f / dt) / IMAS_POR_VOLTA;   // rotações/s - aqui mede quantos pulsos daria por segundo, ele tem o valor do dt, ou seja divide 1/dt e sabe que em q s ele daria X pulsos
-      velocidade_inst = rps * CIRCUNFERENCIA;     // m/s 
-
-      // Filtro EMA (1ª ordem)
+      // Filtro EMA suaviza ruídos do sensor
       velocidade_filt += ALPHA * (velocidade_inst - velocidade_filt);
       velocidade = velocidade_filt;
-      rpm = rps * 60.0f;
 
-    enviarTelemetria();
+      enviarTelemetria();
     }
-  } else {
-   
   }
-
-
-  
 }

@@ -1,4 +1,4 @@
-//CODIGO ARDUINO 1 DA PISTA
+// CODIGO ARDUINO 1 DA PISTA
 
 #include <SPI.h>
 #include <nRF24L01.h>
@@ -6,468 +6,405 @@
 #include <Servo.h>
 #include <SoftwareSerial.h>
 
-// RÁDIO RF24
+// ============================================================
+// RADIO RF24
+// ============================================================
 RF24 radio(9, 10); // CE, CSN
 
-const byte enderecoPista[6] = "FGH789";  // escuta
-const byte enderecoCarro[6]    = "ABC123";  // escreve
+const byte enderecoPista[6] = "FGH789"; // escuta (controle remoto + carro)
+const byte enderecoCarro[6] = "ABC123"; // pipe 2 (reservado)
 
+// ============================================================
 // SERVO (CATRACA)
+// ============================================================
 Servo servoMotor;
 const int SERVO_PIN = 4;
 
+// ============================================================
 // LEDS
+// ============================================================
+const int LEDYELLOW = 6;
+const int LEDRED    = 7;
+const int LEDGREEN  = 8;
 
-const int LEDYELLOW    = 6;
-const int LEDRED      = 7;
-const int LEDGREEN    = 8;
+// ============================================================
+// SERIAL PARA ARDUINO 2
+// ============================================================
+SoftwareSerial serialPista2(A3, A2); // RX=A3, TX=A2
 
-
-// SERIAL PARA ARDUINO PISTA 2
-SoftwareSerial serialPista2(A3, A2); // RX, TX
-String msgRadio  = "";
+// ============================================================
 // SENSORES ANALÓGICOS DA PISTA 1 → S7, S8, S9
-int analogPins[3] = {A0, A1, A4};
+// ============================================================
+int analogPins[3]  = {A0, A1, A4};
 int estadoAntA[3];
 
-// CONTROLE
+// ============================================================
+// VARIÁVEIS DE CONTROLE
 // ============================================================
 char mensagem[32];
+int  anguloAtual = 83; // posição inicial da catraca
 
-int anguloAtual  = 83;   // posição inicial da catraca
-bool ledBlueState = false;
+char  carroID[5]    = "";
+float velCarro      = 0.0f;
+float RotDelta      = 0.0f;
+float RotCarroAtual = 0.0f;
+float RotCarroAnt   = 0.0f;
+float RotInc        = 0.0f;
+long  RotUltimoSensor = 0;
 
-char carroID[5];          // ex: "C1"
-float velCarro = 0.0;     // velocidade vinda do carro
-float RotDelta = 0;        // pulsos/RPM desde último envio
-float RotCarroAtual = 0;
-float limitador = 10; //não considera valores exagerados de rotação 
-float limitadorvel = 5.0; //não considera valores exagerados de rotação 
-long RotUltimoSensor = 0; // RPM acumulado no último sensor
+const float limitador    = 10.0f; // descarta saltos de rotação implausíveis
+const float limitadorvel = 5.0f;  // descarta velocidades implausíveis (m/s)
 
-// Controle de sensores
-int ultimoSensorGravado = -1;
-int ultimoSensorDetectado = -1;
-float ultimaPosicaoRegistrada = 0.000;
-float UltimoTrecho = 0.000;
-float PosProxSensor = 0.000;
-float PosProxSensorLinear = 0.000;
-float DistProxSensor = 0.000;
-float deltaS = 0.000;
-float deltaT = 0.000;
-float deltaV = 0.000;
-float difRof = 0;
-float RotCarroAnt = 0;
-float RotInc = 0;
-int prox = 0;
-int Agr = 0;
+// ============================================================
+// CONTROLE DE SENSORES
+// ============================================================
+int   ultimoSensorGravado    = -1;
+int   ultimoSensorDetectado  = -1;
+float ultimaPosicaoRegistrada = 0.0f;
+float UltimoTrecho            = 0.0f;
+float PosProxSensor           = 0.0f;
+float PosProxSensorLinear     = 0.0f;
+float DistProxSensor          = 0.0f;
+float deltaS  = 0.0f;
+float deltaT  = 0.0f;
+float difRof  = 0.0f;
+int   prox    = 0;
+int   Agr     = 0;
+int   inicio  = 0;
 
-int inicio = 0;
-
-float poslinearsensor = 0.000;
-float distanciaTotal = 0.000;
-float ultimaVelocidadeCalculada = 0.000;
-float ultimaVelocidadeCalculadaAnt = 0.000;
+float poslinearsensor             = 0.0f;
+float distanciaTotal              = 0.0f;
+float ultimaVelocidadeCalculada   = 0.0f;
+float TrechoAgr = 0.0f;
+float TrechoAnt = 0.0f;
 
 unsigned long tUltimoPontoSensor = 0;
-unsigned long tAgora = 0;
-int ultimoSensorAcelPos = 0;  //Armazena o último sensor onde a aceleração foi positiva
-float TrechoAgr = 0.000; //---------------
-int qtd = 0;
+unsigned long tAgora             = 0;
 
-float TrechoAnt = 0.0; //---------------
+// ============================================================
+// MAPA DA PISTA (posições e distâncias em metros)
+// ============================================================
 
-float distTrecho[9] = {
-  0.355,  // S1→S2
-  0.280,  // S2→S3  
-  0.275,  // S3→S4
-  0.280,  // S4→S5
-  0.280,  // S5→S6
-  0.750,  // S6→S7
-  0.700,  // S7→S8
-  0.590,  // S8→S9
-  0.775   // S9→S1
-};
-
+// pos[i] = posição linear acumulada do sensor Si+1 na pista
 float pos[9] = {
-  4.285,  // S1
-  0.355,  // S2
-  0.635,  // S3
-  0.910,  // S4
-  1.190,  // S5
-  1.470,  // S6
-  2.220,  // S7
-  2.920,  // S8
-  3.510   // S9
+  4.285f,  // S1 (linha de chegada / lap)
+  0.355f,  // S2
+  0.635f,  // S3
+  0.910f,  // S4
+  1.190f,  // S5
+  1.470f,  // S6
+  2.220f,  // S7
+  2.920f,  // S8
+  3.510f   // S9
 };
 
-// Controle de tempo e PWM
+// distTrecho[i] = distância do sensor Si+1 ao próximo sensor
+float distTrecho[9] = {
+  0.355f,  // S1→S2
+  0.280f,  // S2→S3
+  0.275f,  // S3→S4
+  0.280f,  // S4→S5
+  0.280f,  // S5→S6
+  0.750f,  // S6→S7
+  0.700f,  // S7→S8
+  0.590f,  // S8→S9
+  0.775f   // S9→S1
+};
+
+// ============================================================
+// CONTROLE DE TEMPO E PWM
+// ============================================================
 unsigned long tInicio = 0;
+bool testeHabilitado  = false;
+int  ultimoPWM        = 0;
+char ultimoTipoPWM    = '-';
 
-
-bool testeHabilitado = false;
-int ultimoPWM = 0;
-char ultimoTipoPWM = '-';
-
-
-#define TAM_BUFFER 50
-
-char buffer[TAM_BUFFER];
-
-char iniciale[TAM_BUFFER];
-char nomeSensor[4];
-byte idx = 0;
 // ============================================================
 // SETUP
 // ============================================================
 void setup() {
-
   Serial.begin(9600);
   serialPista2.begin(9600);
+  serialPista2.setTimeout(200); // evita bloqueio longo em mensagens malformadas
 
-  for (int i = 0; i < 6; i++) {
-    pinMode(analogPins[i], INPUT); // Garante que os pinos são entradas
-    estadoAntA[i] = analogRead(analogPins[i]); // Tira a "foto" inicial da luminosidade
+  // CORREÇÃO: loop só até 3 — analogPins[] e estadoAntA[] têm 3 elementos
+  for (int i = 0; i < 3; i++) {
+    estadoAntA[i] = analogRead(analogPins[i]);
   }
 
-
-  // LEDs
-  pinMode(LEDRED, OUTPUT);
-  pinMode(LEDGREEN, OUTPUT);
+  pinMode(LEDRED,    OUTPUT);
+  pinMode(LEDGREEN,  OUTPUT);
   pinMode(LEDYELLOW, OUTPUT);
 
-  digitalWrite(LEDGREEN, HIGH);
-  digitalWrite(LEDRED, LOW); 
+  digitalWrite(LEDGREEN,  HIGH);
+  digitalWrite(LEDRED,    LOW);
   digitalWrite(LEDYELLOW, LOW);
 
-  // Rádio
   radio.begin();
   radio.setPALevel(RF24_PA_LOW);
   radio.setDataRate(RF24_250KBPS);
   radio.setChannel(108);
-  radio.openReadingPipe(1, enderecoPista); // controle → pista
-  radio.openReadingPipe(2, enderecoCarro);  // carro → pista (se precisar no futuro)
+  radio.openReadingPipe(1, enderecoPista);
+  radio.openReadingPipe(2, enderecoCarro);
   radio.startListening();
+
   Serial.println("Arduino Pista 1 pronto. Aguardando RF...");
 }
-
 
 // ============================================================
 // LOOP PRINCIPAL
 // ============================================================
 void loop() {
 
-// No Arduino 1
-if (serialPista2.available() > 0) {
-    String entrada = "";
-    while (serialPista2.available() > 0) {
-        char c = serialPista2.read();
-        if (c == '\n') break;
-        if (c != '\r') entrada += c;
-        delay(1); // Pequeno delay para o buffer serial encher
-    }
-    
+  // ----- RECEBE NOTIFICAÇÃO DE SENSOR DO ARDUINO 2 -----
+  if (serialPista2.available() > 0) {
+    // CORREÇÃO: readStringUntil substitui o loop com delay(1) por caractere
+    String entrada = serialPista2.readStringUntil('\n');
     entrada.trim();
-    if (entrada.length() > 0) {
-        //Serial.print("--- RECEBIDO: ");
-        //Serial.println(entrada);
 
-        if (entrada.startsWith("S")) {
-          //Serial.print(entrada);
-            int n = entrada.substring(1).toInt();
-            if (n >= 1 && n <= 6) processaSensor(n - 1);
-        } 
+    if (entrada.length() > 0 && entrada.startsWith("S")) {
+      int n = entrada.substring(1).toInt();
+      if (n >= 1 && n <= 6) processaSensor(n - 1);
     }
-}
-// FINALIZA AQUI OS RECEBIMENTOS DO OUTRO ARDUINO
+  }
+
+  // ----- LÊ SENSORES LDR LOCAIS (S7, S8, S9) -----
   for (int i = 0; i < 3; i++) {
     int leitura = analogRead(analogPins[i]);
 
     if (leitura <= 700 && estadoAntA[i] > 700) {
-      
-      int idSensor = i + 7; // Mapeia 0,1,2 para S7, S8, S9
-    
-      processaSensor(idSensor); 
+      // CORREÇÃO: i+6 mapeia corretamente 0,1,2 → índices 6,7,8 (S7, S8, S9)
+      processaSensor(i + 6);
     }
-    
-    // Atualiza o estado anterior para a próxima volta do loop
+
     estadoAntA[i] = leitura;
   }
 
-// 2) RECEBE RF DO CONTROLE E REPASSA SEMPRE
-if (radio.available()) {
-  digitalWrite(LEDYELLOW, HIGH);
-  memset(mensagem, 0, sizeof(mensagem));
-  radio.read(mensagem, sizeof(mensagem));
+  // ----- RECEBE RF (CONTROLE REMOTO E CARRO) -----
+  if (radio.available()) {
+    digitalWrite(LEDYELLOW, HIGH);
+    memset(mensagem, 0, sizeof(mensagem));
+    radio.read(mensagem, sizeof(mensagem));
 
-  Serial.print("RF recebido: ");
-  Serial.println(mensagem);
-  
-  // PACOTE DE TELEMETRIA DO CARRO (Cx,vel,rpm)
-  if (mensagem[0] == 'C') {
+    Serial.print("RF recebido: ");
+    Serial.println(mensagem);
+
+    if (mensagem[0] == 'C') {
+      // Telemetria do carro: "C1;velocidade;rotacoes"
       RecebeHall(mensagem);
-  }
-  
-  else if (mensagem[0] == 'd') { // PWM DEGRAU 
-    ultimoTipoPWM = 'd';
-    String msg = String(mensagem);
-    msg.trim();
-    ultimoPWM = msg.substring(1).toInt();
-    //Serial.print("ultimoTipoPWM");Serial.println(ultimoTipoPWM);
-    //Serial.print("ultimoPWM");Serial.println(ultimoPWM);
-  }
-  else if (strcmp(mensagem, "GO") == 0) {
-    servoMotor.attach(SERVO_PIN);
 
-    if (anguloAtual == 100) {
+    } else if (mensagem[0] == 'd') {
+      // Comando de PWM degrau do controle remoto
+      ultimoTipoPWM = 'd';
+      String msg = String(mensagem);
+      msg.trim();
+      ultimoPWM = msg.substring(1).toInt();
 
-      anguloAtual = 220;
-      digitalWrite(LEDGREEN, LOW);
-      digitalWrite(LEDRED, HIGH);
-      
-      serialPista2.println("Catraca aberta");
-      //Serial.println("Catraca aberta");
-      testeHabilitado = true;
-      ultimaVelocidadeCalculada = 0.0;
-      distanciaTotal = 0.0;
-      ultimoSensorGravado = -1;
-      ultimoSensorDetectado = -1;
-      tInicio = micros(); //fixa o tempo inicial 
-      tAgora = 0;
+    } else if (strcmp(mensagem, "GO") == 0) {
+      servoMotor.attach(SERVO_PIN);
 
-      snprintf(iniciale, sizeof(iniciale), "%lu;GO_aberto", tAgora);
-      //Serial.println(iniciale);
-      serialPista2.println(iniciale);
-      
+      if (anguloAtual == 100) {
+        // Abre a catraca e inicia o experimento
+        anguloAtual = 220;
+        digitalWrite(LEDGREEN, LOW);
+        digitalWrite(LEDRED,   HIGH);
 
+        testeHabilitado = true;
+        ultimaVelocidadeCalculada = 0.0f;
+        distanciaTotal            = 0.0f;
+        ultimoSensorGravado       = -1;
+        ultimoSensorDetectado     = -1;
+        inicio = 0;
+        tInicio = micros();
+        tAgora  = 0;
 
-    } else {
+        char iniciale[50];
+        snprintf(iniciale, sizeof(iniciale), "%lu;GO_aberto", tAgora);
+        serialPista2.println(iniciale);
 
-      anguloAtual = 100;
-      digitalWrite(LEDGREEN, HIGH);
-      digitalWrite(LEDRED, LOW);
-      tAgora = (micros() - tInicio) ;
-      snprintf(iniciale, sizeof(iniciale), "%lu;GO_fechado", tAgora);
-      //Serial.println(iniciale);
-      serialPista2.println(iniciale);
+      } else {
+        // Fecha a catraca e encerra o experimento
+        anguloAtual = 100;
+        digitalWrite(LEDGREEN, HIGH);
+        digitalWrite(LEDRED,   LOW);
 
-      
-    }
-
-    servoMotor.write(anguloAtual);
-    delay(100);
-    servoMotor.detach();
-  }
-  digitalWrite(LEDYELLOW, LOW);
-}
-    
-}
-
-
-void RecebeHall(const String& mensagem) { // recebe do arduino1 itens iniciando com C
-    Serial.print("mensagemmmmmmmm");Serial.print(mensagem);
-    String msg = String(mensagem);
-    ultimoPWM = msg.substring(1).toInt();
-    msg.trim();
-    
-    //descobre onde estão as vírgulas
-    int p1 = msg.indexOf(';'); // salva na variável p1 a posição da primeira vírgula
-    int p2 = msg.indexOf(';', p1 + 1); //salva na variável p2 a posição da segunda vírgula
-
-    //Serial.println(p1);
-    //Serial.println(p2);
-
-
-    if (p1 > 0 && p2 > p1) { //apenas pra filtrar lixos que as vezes vem bugado 
-
-      String sID  = msg.substring(0, p1); //salva todos os digitos entre posição 0 e posição do p1 
-      String sVel = msg.substring(p1 + 1, p2); //pega logo depois da primeira vírgula até antes da segunda.
-      String sRPM = msg.substring(p2 + 1); //pega logo depois da segunda vírgula até o final.
-
-      
-      //Serial.print ("sID: "); Serial.println (sID);
-      //Serial.print ("sVel: ");Serial.println (sVel);
-     // Serial.print ("sRPM: "); Serial.println (sRPM);
-      
-      sID.toCharArray(carroID, sizeof(carroID)); // converte pra vetor(carroID) terminada em \0 
-      velCarro = sVel.toFloat(); //converte em float (numero)
-      RotCarroAtual = sRPM.toFloat()  - RotInc - 1 ;  // converte para numero inteiro (numero de rotações)
-      difRof = RotCarroAtual  ;
-
-      if (RotCarroAtual >= RotCarroAnt && difRof < limitador && velCarro < limitadorvel ) { //mede o PWM ao longo do tempo desconsiderando valor negativo 
-      RotDelta = RotCarroAtual - RotUltimoSensor; //rotação desde o ultimo sensor      
-      gravaPWM_C();
-
+        tAgora = micros() - tInicio;
+        char iniciale[50];
+        snprintf(iniciale, sizeof(iniciale), "%lu;GO_fechado", tAgora);
+        serialPista2.println(iniciale);
       }
-      RotCarroAnt = RotCarroAtual;
-      
+
+      servoMotor.write(anguloAtual);
+      delay(100);
+      servoMotor.detach();
     }
-} 
 
-void gravaPWM_C() { //recebe um bloco de infos 
-
-  //Serial.println(testeHabilitado);
-  if (!testeHabilitado) return;
-  tAgora = micros() - tInicio; //atualiza tempo 
-
-  if (RotDelta <= 0) return;// Se não houve avanço real, não grava
-
-  const float diametroRoda = 0.024;
-  const float circRoda = PI * diametroRoda;
-
-  float deltaDistRPM = (RotDelta) * circRoda; //calculando sistanccia percorrida de acordo com as rotações   
-  float distanciaEstimativa = ultimaPosicaoRegistrada + deltaDistRPM; //considera a posição do ultimo sensor + dist percorrida estimada
-  
-  // Limite por sensor físico
-  if (distanciaEstimativa > PosProxSensorLinear) {
-    distanciaEstimativa = PosProxSensorLinear;
+    digitalWrite(LEDYELLOW, LOW);
   }
+}
 
-  distanciaTotal = distanciaEstimativa;
+// ============================================================
+// RECEPÇÃO DE TELEMETRIA DO CARRO
+// ============================================================
+// CORREÇÃO: parâmetro como const char* (eficiência — evita cópia de String)
+// CORREÇÃO: removida linha que lia ultimoPWM incorretamente da mensagem do carro
+void RecebeHall(const char* dados) {
+  String msg = String(dados);
+  msg.trim();
+
+  int p1 = msg.indexOf(';');
+  int p2 = msg.indexOf(';', p1 + 1);
+
+  if (p1 > 0 && p2 > p1) {
+    String sID  = msg.substring(0, p1);
+    String sVel = msg.substring(p1 + 1, p2);
+    String sRPM = msg.substring(p2 + 1);
+
+    sID.toCharArray(carroID, sizeof(carroID));
+    velCarro      = sVel.toFloat();
+    RotCarroAtual = sRPM.toFloat() - RotInc - 1;
+    difRof        = RotCarroAtual;
+
+    if (RotCarroAtual >= RotCarroAnt && difRof < limitador && velCarro < limitadorvel) {
+      RotDelta = RotCarroAtual - RotUltimoSensor;
+      gravaPWM_C();
+    }
+
+    RotCarroAnt = RotCarroAtual;
+  }
+}
+
+// ============================================================
+// GRAVA DADOS CONTÍNUOS DO HALL (entre sensores)
+// ============================================================
+void gravaPWM_C() {
+  if (!testeHabilitado) return;
+
+  tAgora = micros() - tInicio;
+
+  if (RotDelta <= 0) return; // sem avanço real, não grava
+
+  // CORREÇÃO: diâmetro 0.0245 m (consistente com Carrinho.ino e README)
+  const float diametroRoda = 0.0245f;
+  const float circRoda     = PI * diametroRoda;
+
+  float deltaDistRPM      = RotDelta * circRoda;
+  float distanciaEstimativa = ultimaPosicaoRegistrada + deltaDistRPM;
+
+  // Limita estimativa ao alcance do próximo sensor físico
+  if (distanciaEstimativa > PosProxSensorLinear)
+    distanciaEstimativa = PosProxSensorLinear;
+
+  distanciaTotal            = distanciaEstimativa;
   ultimaVelocidadeCalculada = velCarro;
 
-
-
-  if(RotCarroAtual != RotCarroAnt){
+  if (RotCarroAtual != RotCarroAnt) {
     EnviaSerialHall();
   }
   RotCarroAnt = RotCarroAtual;
-  
 }
 
- 
-
+// ============================================================
+// PROCESSA DETECÇÃO DE SENSOR
+// ============================================================
 void processaSensor(int idxAtual) {
-  
-  if (idxAtual == ultimoSensorGravado)  // evita gravar o mesmo sensor duas vezes seguidas
-    return;
+  if (idxAtual == ultimoSensorGravado) return; // evita duplo registro
 
-  tAgora = micros() - tInicio;  // calculando tempo em ms
-  //Serial.print("tAgora:");Serial.println(tAgora);
-  Agr = idxAtual % 9;  //descubro qual sensor (antre 1-9 acabou de passar) 
-  //Serial.print("tAgora:");Serial.println(tAgora);
-  TrechoAgr = pos[Agr]; // ex: se foi o sensor 9, identifica que o resto de 9 resto 9 é 0 msm e retorna pos[0] = 4.280   
-   //Serial.print("TrechoAgr:");Serial.println(TrechoAgr);
-  float L = pos[0];  // comprimento total da pista (4.280) 
-  //Serial.print("L:");Serial.println(L);
-  //IF Abaixo serve de segurança para caso de falha de algum sensor 
+  tAgora = micros() - tInicio;
+  Agr    = idxAtual % 9;
+  TrechoAgr = pos[Agr];
 
-  if (TrechoAgr >= TrechoAnt) { //1 - se o techo agr é maior que o anterior (padrão)
-    UltimoTrecho = TrechoAgr - TrechoAnt; //basta subrair os trechos 
-    TrechoAnt = TrechoAgr; //atualiza trecho ante
-  } else {  // 2 - quando o agr é menor (ex: pos[1] - pos[0] ou pos[2] - pos[7])
-    UltimoTrecho = (L - TrechoAnt) + TrechoAgr;  // atualiza o ultimo trecho passado
-    //ex:  pos[2] - pos[7] =  0,355 - 2,215 = -1.86 ; o que ele vai fazer: (L - pos[7]) + pos[2] = (4.280 - 2.215 ) + 0.635 = 2.7 - valor ofc queele percorreu 
-    TrechoAnt = TrechoAgr; //atualiza trecho ante
+  float L = pos[0]; // comprimento total da pista
+
+  if (TrechoAgr >= TrechoAnt) {
+    UltimoTrecho = TrechoAgr - TrechoAnt;
+  } else {
+    // Cruzamento da linha de chegada (S9 → S1)
+    UltimoTrecho = (L - TrechoAnt) + TrechoAgr;
   }
+  TrechoAnt = TrechoAgr;
 
-  //Serial.print("TrechoAnt:");Serial.println(TrechoAnt);
+  prox = (idxAtual + 1) % 9;
+  PosProxSensor    = pos[prox];
+  DistProxSensor   = distTrecho[prox];
 
-
-  prox = (idxAtual + 1) % 9; //descubro pos provavel do prox sensor ativado 
-  //Serial.print("prox:");Serial.println(prox);
-  PosProxSensor = pos[prox];  // posição do próximo sensor (seu array de posições)
-  //Serial.print("PosProxSensor:");Serial.println(PosProxSensor);
-  DistProxSensor = distTrecho[prox];  // trecho até o próximo sensor considerando o sensor atual 
-  //Serial.print("DistProxSensor:");Serial.println(DistProxSensor);
-//Entrou no processaSensor, até aqui eu tenho (sensor ativado, dist do ssensor atual ao ultimo que foi ativado, previsibilidade para o prox sensor)
-//Serial.print("iniciooooo:");Serial.println(inicio);
-  // PRIMEIRO SENSOR DO TESTE
-  if (inicio == 0) {  //verifica se é o primeiro sensor a ser ativado, se sim, inicia tudo no 0
-    ultimaPosicaoRegistrada = 0.0;
-    distanciaTotal = 0.0; 
-    deltaT = tAgora/ 1e6;        //Atualiza tempo
-    deltaS = 0.03;  // nesse caso é por padrão 3cm  (medição fisica)
-    ultimaVelocidadeCalculada = deltaS / deltaT; //velocidade atual
-    //Serial.print("ultimaVelocidadeCalculada:");Serial.println(ultimaVelocidadeCalculada);
-    TrechoAnt = 0.0; //atualiza trecho ant 
-    RotInc = RotCarroAtual + 1  ;
+  if (inicio == 0) {
+    // Primeiro sensor do experimento
+    ultimaPosicaoRegistrada  = 0.0f;
+    distanciaTotal           = 0.0f;
+    deltaT = tAgora / 1e6f;
+    deltaS = 0.03f; // 3 cm: distância física estimada do ponto inicial ao sensor
+    ultimaVelocidadeCalculada = deltaS / deltaT;
+    TrechoAnt = 0.0f;
+    RotInc    = RotCarroAtual + 1;
 
     EnviaSerial(Agr);
 
-    tUltimoPontoSensor = tAgora;                                     //variável para  ultimo tempo atualizado
-    UltimoTrecho = 0.0;                                              //variável para atualizar a posição do sensor que usei, neste caso do *inicio* sempre será a posição 0
-        
-    poslinearsensor = 0.0;      //atualiza que a variavel ultimavelocidade calculada                                     //iniciavariavel que acompanha trecho linear do SENSOR (é o primeiro sensor, ele dá inicio)
-    PosProxSensorLinear = ultimaPosicaoRegistrada + pos[1];  //Atualiza a proxima posição do sensor
-    inicio = 1;   
-    //Serial.print("inicio2222:");Serial.println(inicio);                                                   //n é mais o primeiro sensor sensor
-  }
+    tUltimoPontoSensor  = tAgora;
+    UltimoTrecho        = 0.0f;
+    poslinearsensor     = 0.0f;
+    PosProxSensorLinear = ultimaPosicaoRegistrada + pos[1];
+    inicio = 1;
 
-  else {                                                 
-    poslinearsensor = poslinearsensor + UltimoTrecho;    //define qual a posiçãolinear do sensor que acabou de passar
-    deltaT = (tAgora - tUltimoPontoSensor) / 1e6;        //Atualiza variação do tempo
-    deltaS = poslinearsensor - ultimaPosicaoRegistrada;  //calcula o Delta S -> dif entre posições
-    ultimaVelocidadeCalculada = deltaS / deltaT; 
-
-    distanciaTotal = poslinearsensor;  //independente do que aconteça a distância total sempre será a posição linear do sensor sempre será o valor da posição daquele sensor + trajeto anterior
+  } else {
+    poslinearsensor += UltimoTrecho;
+    deltaT = (tAgora - tUltimoPontoSensor) / 1e6f;
+    deltaS = poslinearsensor - ultimaPosicaoRegistrada;
+    ultimaVelocidadeCalculada = deltaS / deltaT;
+    distanciaTotal = poslinearsensor;
 
     EnviaSerial(Agr);
 
-
-    
-    tUltimoPontoSensor = tAgora;
-    
+    tUltimoPontoSensor  = tAgora;
     PosProxSensorLinear = distanciaTotal + DistProxSensor;
-    ultimaPosicaoRegistrada = distanciaTotal; //poslinearsensor;
+    ultimaPosicaoRegistrada = distanciaTotal;
   }
 
-  ultimoSensorGravado = idxAtual; //para saber o ultimo sensor que passou RotDelta
-  RotUltimoSensor = RotCarroAtual;
-  RotDelta = 0;
-
+  ultimoSensorGravado = idxAtual;
+  RotUltimoSensor     = RotCarroAtual;
+  RotDelta            = 0;
 }
 
+// ============================================================
+// ENVIA DADOS DE SENSOR PARA ARDUINO 2
+// ============================================================
+void EnviaSerial(int sensorPassado) {
+  char sVel[10], sDist[10], sRot[10];
+  char nomeSensor[4]; // CORREÇÃO: variável local (antes era global desnecessária)
 
+  dtostrf(ultimaVelocidadeCalculada, 1, 3, sVel);
+  dtostrf(distanciaTotal,            1, 4, sDist);
+  dtostrf(RotCarroAtual,             1, 2, sRot);
+  sprintf(nomeSensor, "S%d", sensorPassado + 1);
 
-void EnviaSerial(int sensorPassado){
+  char buffer[100];
+  snprintf(buffer, sizeof(buffer), "L;%lu;%s;%c;%d;%s;%s;S;%s",
+           tAgora, nomeSensor, ultimoTipoPWM, ultimoPWM, sVel, sDist, sRot);
 
-  char sVel[10];
-    char sDist[10];
-    char sRot[10];
-
-    dtostrf(ultimaVelocidadeCalculada, 1, 3, sVel);
-    dtostrf(distanciaTotal, 1, 4, sDist);
-    dtostrf(RotCarroAtual, 1, 2, sRot);
-    sprintf(nomeSensor, "S%d", sensorPassado + 1);
-
-    char buffer[100]; // Aumentei o tamanho para garantir que caiba tudo
-    snprintf(buffer, sizeof(buffer), "L;%lu;%s;%c;%d;%s;%s;S;%s",
-            tAgora,
-            nomeSensor,
-            ultimoTipoPWM,
-            ultimoPWM,
-            sVel,   
-            sDist,  
-            sRot);  
-
-    Serial.print("buffer:");Serial.println(buffer);
-    serialPista2.println(buffer);
+  Serial.print("buffer: "); Serial.println(buffer);
+  serialPista2.println(buffer);
 }
 
+// ============================================================
+// ENVIA DADOS CONTÍNUOS DO HALL PARA ARDUINO 2
+// ============================================================
 void EnviaSerialHall() {
-    // 1. Strings auxiliares para conversão de float (evitar o erro do '?')
-    char sVel[10], sDist[10], sRot[10];
-    dtostrf(ultimaVelocidadeCalculada, 1, 3, sVel);
-    dtostrf(distanciaTotal, 1, 4, sDist);
-    dtostrf(RotCarroAtual, 1, 2, sRot);
+  char sVel[10], sDist[10], sRot[10];
 
-    // 2. Buffer para montagem da mensagem
-    char buffer[120]; 
+  dtostrf(ultimaVelocidadeCalculada, 1, 3, sVel);
+  dtostrf(distanciaTotal,            1, 4, sDist);
+  dtostrf(RotCarroAtual,             1, 2, sRot);
 
-    // 3. Montagem seguindo o padrão:
-    // H; tempo; ultimoSensor; tipoPWM; valorPWM; velocidade; distancia; IDCarro; rotação
-    snprintf(buffer, sizeof(buffer), "H;%lu;S%d;%c;%d;%s;%s;%s;%s",
-            tAgora,
-            ultimoSensorGravado + 1, // Ex: S1, S2... baseado no último sensor que o carro passou
-            ultimoTipoPWM,
-            ultimoPWM,
-            sVel,
-            sDist,
-            carroID, // String (ex: C1)
-            sRot);
+  char buffer[120];
+  snprintf(buffer, sizeof(buffer), "H;%lu;S%d;%c;%d;%s;%s;%s;%s",
+           tAgora,
+           ultimoSensorGravado + 1,
+           ultimoTipoPWM,
+           ultimoPWM,
+           sVel, sDist,
+           carroID,
+           sRot);
 
-    // 4. Envio
-    Serial.print("buffer Hall:"); Serial.println(buffer);
-    serialPista2.println(buffer);
+  Serial.print("buffer Hall: "); Serial.println(buffer);
+  serialPista2.println(buffer);
 }
